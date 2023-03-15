@@ -325,10 +325,10 @@ def get_data(name, augment=False, **kwargs):
         root = '/home/ubuntu/chexpertchestxrays-u20210408/CheXpert-v1.0/'
 
         # Index: -1 denotes multi-label mode including 5 diseases
-        traindSet = CheXpert(csv_path=root + 'train.csv', image_root_path=root, use_upsampling=True, use_frontal=True,
+        train_set = CheXpert(csv_path=root + 'train.csv', image_root_path=root, use_upsampling=True, use_frontal=True,
                              image_size=64, mode='train', class_index=-1)
-        testSet = CheXpert(csv_path=root + 'valid.csv', image_root_path=root, use_upsampling=False, use_frontal=True,
-                           image_size=64, mode='valid', class_index=-1)
+        test_set = CheXpert(csv_path=root + 'valid.csv', image_root_path=root, use_upsampling=False, use_frontal=True,
+                            image_size=64, mode='valid', class_index=-1)
 
     else:
         raise ValueError(f"unknown dataset {name}")
