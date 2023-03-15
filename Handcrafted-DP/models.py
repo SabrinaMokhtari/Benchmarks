@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
+
 def standardize(x, bn_stats):
     if bn_stats is None:
         return x
@@ -163,6 +164,7 @@ class MNIST_CNN(nn.Module):
         x = self.classifier(x)
         return x
 
+
 class ChestXRay_CNN(nn.Module):
     def __init__(self, in_channels=3, input_norm=None, **kwargs):
         super(ChestXRay_CNN, self).__init__()
@@ -182,7 +184,7 @@ class ChestXRay_CNN(nn.Module):
         else:
             print("build:", self.in_channels)
             cfg = [64, 'M', 64]
-            
+
             if input_norm is None:
                 self.norm = nn.Identity()
             elif input_norm == "GroupNorm":
@@ -219,6 +221,7 @@ class ChestXRay_CNN(nn.Module):
         x = self.classifier(x)
         return x
 
+
 class Retinal_CNN(nn.Module):
     def __init__(self, in_channels=3, input_norm=None, **kwargs):
         super(Retinal_CNN, self).__init__()
@@ -238,7 +241,7 @@ class Retinal_CNN(nn.Module):
         else:
             print("build:", self.in_channels)
             cfg = [64, 'M', 64]
-            
+
             if input_norm is None:
                 self.norm = nn.Identity()
             elif input_norm == "GroupNorm":
@@ -310,6 +313,61 @@ class ScatterLinear(nn.Module):
         return x
 
 
+class CheXpert_CNN(nn.Module):
+    def __init__(self, in_channels=3, input_norm=None, **kwargs):
+        super(CheXpert_CNN, self).__init__()
+        self.in_channels = in_channels
+        self.features = None
+        self.classifier = None
+        self.norm = None
+
+        self.build(input_norm, **kwargs)
+
+    def build(self, input_norm=None, num_groups=None,
+              bn_stats=None, size=None):
+        if self.in_channels == 3:
+            cfg = [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M']
+
+            self.norm = nn.Identity()
+        else:
+            print("build:", self.in_channels)
+            cfg = [64, 'M', 64]
+
+            if input_norm is None:
+                self.norm = nn.Identity()
+            elif input_norm == "GroupNorm":
+                self.norm = nn.GroupNorm(num_groups, self.in_channels, affine=False)
+            else:
+                self.norm = lambda x: standardize(x, bn_stats)
+
+        layers = []
+        act = nn.Tanh
+
+        c = self.in_channels
+        for v in cfg:
+            if v == 'M':
+                layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+            else:
+                conv2d = nn.Conv2d(c, v, kernel_size=3, stride=1, padding=1)
+
+                layers += [conv2d, act()]
+                c = v
+
+        self.features = nn.Sequential(*layers)
+
+        if self.in_channels == 3:
+            hidden = 128
+            self.classifier = nn.Sequential(nn.Linear(c * 4 * 4, hidden), act(), nn.Linear(hidden, 5))
+        else:
+            self.classifier = nn.Linear(c * 8 * 8, 5)
+
+    def forward(self, x):
+        if self.in_channels != 3:
+            x = self.norm(x.view(-1, self.in_channels, 16, 16))
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
 
 
 CNNS = {
@@ -318,8 +376,5 @@ CNNS = {
     "mnist": MNIST_CNN,
     "chest_xray": ChestXRay_CNN,
     "eye": Retinal_CNN,
+    "chexpert": CheXpert_CNN
 }
-
-
-
-
