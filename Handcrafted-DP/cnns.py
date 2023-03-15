@@ -139,7 +139,7 @@ def main(dataset, augment=False, use_scattering=False, size=None,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', choices=['cifar10', 'fmnist', 'mnist', 'chest_xray', 'eye'])
+    parser.add_argument('--dataset', choices=['cifar10', 'fmnist', 'mnist', 'chest_xray', 'eye', 'chexpert'])
     parser.add_argument('--size', default=None)
     parser.add_argument('--augment', action="store_true")
     parser.add_argument('--use_scattering', action="store_true")
