@@ -8,29 +8,38 @@ import logging
 import torchvision
 from torch.utils.data import DataLoader, Dataset
 
+from libauc.losses import AUCMLoss, CrossEntropyLoss
+from libauc.optimizers import PESG, Adam
+from libauc.models import densenet121 as DenseNet121
+from libauc.datasets import CheXpert
+from PIL import Image
+from sklearn.metrics import roc_auc_score
+
+
 class MyImageDataset(Dataset):
-  def __init__(self, root, transform=None, target_transform=None, augment=None):
-    self.root = root
-    self.augment = augment
-    self.transform = transform
-    self.target_transform = target_transform
-    self.image_folder = torchvision.datasets.ImageFolder(self.root)
+    def __init__(self, root, transform=None, target_transform=None, augment=None):
+        self.root = root
+        self.augment = augment
+        self.transform = transform
+        self.target_transform = target_transform
+        self.image_folder = torchvision.datasets.ImageFolder(self.root)
 
-  def __len__(self):
-    return len(self.image_folder.imgs)
+    def __len__(self):
+        return len(self.image_folder.imgs)
 
-  def __getitem__(self, idx):
-    path, target = self.image_folder.imgs[idx]
-    img = self.image_folder.loader(path)
-    if self.transform is not None:
-      img = self.transform(img)
-    if self.target_transform is not None:
-      target = self.target_transform(target)
-    return img, target
+    def __getitem__(self, idx):
+        path, target = self.image_folder.imgs[idx]
+        img = self.image_folder.loader(path)
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
 
-  def __getshape__(self):
-      print("HI:\n")
-      return (self.__len__(), *self.__getitem__(0)[0].shape)
+    def __getshape__(self):
+        print("HI:\n")
+        return (self.__len__(), *self.__getitem__(0)[0].shape)
+
 
 SHAPES = {
     "cifar10": (32, 32, 3),
@@ -47,7 +56,7 @@ def get_scatter_transform(dataset):
     scattering = Scattering2D(J=2, shape=shape[:2])
     K = 81 * shape[2]
     (h, w) = shape[:2]
-    return scattering, K, (h//4, w//4)
+    return scattering, K, (h // 4, w // 4)
 
 
 def get_data(name, augment=False, **kwargs):
@@ -57,11 +66,11 @@ def get_data(name, augment=False, **kwargs):
 
         if augment:
             train_transforms = [
-                    transforms.RandomHorizontalFlip(),
-                    transforms.RandomCrop(32, 4),
-                    transforms.ToTensor(),
-                    normalize,
-                ]
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(32, 4),
+                transforms.ToTensor(),
+                normalize,
+            ]
         else:
             train_transforms = [
                 transforms.ToTensor(),
@@ -121,25 +130,34 @@ def get_data(name, augment=False, **kwargs):
                                           download=True,
                                           transform=transforms.Compose(train_transforms))
         test_set = None
-    
+
     elif name == "chest_xray":
         main_dir = '/content/drive/MyDrive/CS860/Project/Kaggle/chest_xray'
         train_dir = main_dir + '/train'
         test_dir = main_dir + '/test'
 
-        trans=transforms.Compose(transforms=[transforms.Resize((64,64)), transforms.ToTensor()])
+        trans = transforms.Compose(transforms=[transforms.Resize((64, 64)), transforms.ToTensor()])
         train_set = MyImageDataset(root=train_dir, transform=trans)
         test_set = MyImageDataset(root=test_dir, transform=trans)
-    
+
     elif name == "eye":
         main_dir = '/content/drive/MyDrive/CS860/Project/Kaggle/OCT2017 '
         train_dir = main_dir + '/train'
         test_dir = main_dir + '/test'
 
-        trans=transforms.Compose(transforms=[transforms.Resize((64,64)), transforms.ToTensor()])
+        trans = transforms.Compose(transforms=[transforms.Resize((64, 64)), transforms.ToTensor()])
         train_set = MyImageDataset(root=train_dir, transform=trans)
         test_set = MyImageDataset(root=test_dir, transform=trans)
-    
+
+    elif name == "chexpert":
+        root = '/home/ubuntu/chexpertchestxrays-u20210408/CheXpert-v1.0/'
+
+        # Index: -1 denotes multi-label mode including 5 diseases
+        train_set = CheXpert(csv_path=root + 'train.csv', image_root_path=root, use_upsampling=False, use_frontal=True,
+                             image_size=224, mode='train', class_index=-1)
+        test_set = CheXpert(csv_path=root + 'valid.csv', image_root_path=root, use_upsampling=False, use_frontal=True,
+                            image_size=224, mode='valid', class_index=-1)
+
     else:
         raise ValueError(f"unknown dataset {name}")
 
@@ -184,7 +202,7 @@ class SemiSupervisedDataset(torch.utils.data.Dataset):
             # note that we use unsup indices to track the labeled datapoints
             # whose labels are "fake"
             self.unsup_indices.extend(
-                range(orig_len, orig_len+len(aux_data)))
+                range(orig_len, orig_len + len(aux_data)))
 
             logger = logging.getLogger()
             logger.info("Training set")
@@ -256,11 +274,11 @@ class SemiSupervisedSampler(torch.utils.data.Sampler):
         batch_counter = 0
         inds_shuffled = [self.inds[i] for i in torch.randperm(len(self.inds))]
 
-        while len(inds_shuffled) < self.num_batches*self.batch_size:
+        while len(inds_shuffled) < self.num_batches * self.batch_size:
             temp = [self.inds[i] for i in torch.randperm(len(self.inds))]
             inds_shuffled.extend(temp)
 
-        for k in range(0, self.num_batches*self.batch_size, self.batch_size):
+        for k in range(0, self.num_batches * self.batch_size, self.batch_size):
             if batch_counter == self.num_batches:
                 break
 
