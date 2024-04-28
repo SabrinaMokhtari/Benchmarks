@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 from torchvision import models
+import torch.nn.functional as F
+import numpy as np
 
 
-def standardize(x, bn_stats):
+def standardize(x, bn_stats, grad_sample_mode=None):
     if bn_stats is None:
         return x
 
@@ -15,6 +17,10 @@ def standardize(x, bn_stats):
 
     # if variance is too low, just ignore
     x *= (bn_var.view(view) != 0).float()
+
+    del bn_mean, bn_var, view
+    torch.cuda.empty_cache()
+
     return x
 
 
@@ -46,15 +52,47 @@ class ClipLayer(nn.Module):
     def forward(self, x):
         return clip_data(x, self.max_norm)
 
+class ScaledWSConv2d(nn.Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, gain=True, eps=1e-4):
+        print("ScaledWSConv2d")
+        nn.Conv2d.__init__(self, in_channels, out_channels,
+                           kernel_size, stride,
+                           padding, dilation,
+                           groups, bias)
+        if gain:
+            self.gain = nn.Parameter(
+                torch.ones(self.out_channels, 1, 1, 1))
+        else:
+            self.gain = None
+        # Epsilon, a small constant to avoid dividing by zero.
+        self.eps = eps
+
+    def get_weight(self):
+        # Get Scaled WS weight OIHW;
+        fan_in = np.prod(self.weight.shape[1:])
+        # print("self.weight.shape", self.weight.shape)
+        mean = torch.mean(self.weight, axis=[1, 2, 3],
+                          keepdims=True)
+        var = torch.var(self.weight, axis=[1, 2, 3],
+                        keepdims=True)
+        weight = (self.weight - mean) / (var * fan_in + self.eps) ** 0.5
+        if self.gain is not None:
+            weight = weight * self.gain
+        return weight
+
+    def forward(self, x):
+        return F.conv2d(x, self.get_weight(), self.bias,
+                        self.stride, self.padding,
+                        self.dilation, self.groups)
 
 class CIFAR10_CNN(nn.Module):
-    def __init__(self, in_channels=3, input_norm=None, **kwargs):
+    def __init__(self, in_channels=3, input_norm=None, weight_standardization=False, **kwargs):
         super(CIFAR10_CNN, self).__init__()
         self.in_channels = in_channels
         self.features = None
         self.classifier = None
         self.norm = None
-
+        self.weight_standardization=weight_standardization
         self.build(input_norm, **kwargs)
 
     def build(self, input_norm=None, num_groups=None,
@@ -87,7 +125,11 @@ class CIFAR10_CNN(nn.Module):
             if v == 'M':
                 layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
             else:
-                conv2d = nn.Conv2d(c, v, kernel_size=3, stride=1, padding=1)
+                if self.weight_standardization:
+                    conv2d = ScaledWSConv2d(c, v, kernel_size=3, stride=1, padding=1)
+                    print("ScaledWSConv2d")
+                else:
+                    conv2d = nn.Conv2d(c, v, kernel_size=3, stride=1, padding=1)
 
                 layers += [conv2d, act()]
                 c = v
@@ -156,7 +198,6 @@ class MNIST_CNN(nn.Module):
                                         nn.Linear(hidden, 10))
 
     def forward(self, x):
-        print(x.shape, self.in_channels)
         if self.in_channels != 1:
             x = self.norm(x.view(-1, self.in_channels, 7, 7))
         x = self.features(x)
@@ -182,7 +223,7 @@ class ChestXRay_CNN(nn.Module):
 
             self.norm = nn.Identity()
         else:
-            print("build:", self.in_channels)
+            # print("build:", self.in_channels)
             cfg = [64, 'M', 64]
 
             if input_norm is None:
@@ -239,7 +280,7 @@ class Retinal_CNN(nn.Module):
 
             self.norm = nn.Identity()
         else:
-            print("build:", self.in_channels)
+            # print("build:", self.in_channels)
             cfg = [64, 'M', 64]
 
             if input_norm is None:
@@ -291,6 +332,7 @@ class ScatterLinear(nn.Module):
         self.build(input_norm, classes=classes, clip_norm=clip_norm, **kwargs)
 
     def build(self, input_norm=None, num_groups=None, bn_stats=None, clip_norm=None, classes=10):
+        print("ScatterLinear")
         self.fc = nn.Linear(self.K * self.h * self.w, classes)
 
         if input_norm is None:
@@ -307,30 +349,35 @@ class ScatterLinear(nn.Module):
 
     def forward(self, x):
         x = self.norm(x.view(-1, self.K, self.h, self.w))
-        x = self.clip(x)
-        x = x.reshape(x.size(0), -1)
+        # x = self.clip(x)
+        # x = x.reshape(x.size(0), -1)
+        x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
 
 
 class CheXpert_CNN(nn.Module):
-    def __init__(self, in_channels=3, input_norm=None, **kwargs):
+    def __init__(self, in_channels=3, input_norm=None,weight_standardization=False, grad_sample_mode=None, **kwargs):
         super(CheXpert_CNN, self).__init__()
         self.in_channels = in_channels
         self.features = None
         self.classifier = None
         self.norm = None
-
+        self.weight_standardization = weight_standardization
+        self.grad_sample_mode = grad_sample_mode
         self.build(input_norm, **kwargs)
 
     def build(self, input_norm=None, num_groups=None,
               bn_stats=None, size=None):
+
+        print("size", size)
+
         if self.in_channels == 3:
             cfg = [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M']
 
             self.norm = nn.Identity()
         else:
-            print("build:", self.in_channels)
+            # print("build:", self.in_channels)
             cfg = [64, 'M', 64]
 
             if input_norm is None:
@@ -338,7 +385,7 @@ class CheXpert_CNN(nn.Module):
             elif input_norm == "GroupNorm":
                 self.norm = nn.GroupNorm(num_groups, self.in_channels, affine=False)
             else:
-                self.norm = lambda x: standardize(x, bn_stats)
+                self.norm = lambda x: standardize(x, bn_stats, self.grad_sample_mode)
 
         layers = []
         act = nn.Tanh
@@ -348,7 +395,11 @@ class CheXpert_CNN(nn.Module):
             if v == 'M':
                 layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
             else:
-                conv2d = nn.Conv2d(c, v, kernel_size=3, stride=1, padding=1)
+                if self.weight_standardization:
+                    conv2d = ScaledWSConv2d(c, v, kernel_size=3, stride=1, padding=1)
+                    print("ScaledWSConv2d")
+                else:
+                    conv2d = nn.Conv2d(c, v, kernel_size=3, stride=1, padding=1)
 
                 layers += [conv2d, act()]
                 c = v
@@ -359,16 +410,83 @@ class CheXpert_CNN(nn.Module):
             hidden = 128
             self.classifier = nn.Sequential(nn.Linear(c * 4 * 4, hidden), act(), nn.Linear(hidden, 5))
         else:
-            self.classifier = nn.Linear(c * 8 * 8, 5)
+            self.classifier = nn.Linear(c * 28 * 28, 5)  # 8, 8
 
     def forward(self, x):
         if self.in_channels != 3:
-            x = self.norm(x.view(-1, self.in_channels, 16, 16))
+            x = self.norm(x.view(-1, self.in_channels, 56, 56))  # 16, 16
         x = self.features(x)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
 
+class EYEPACS_CNN(nn.Module):
+    def __init__(self, in_channels=3, input_norm=None, weight_standardization=False, grad_sample_mode="no_op", **kwargs):
+        super(EYEPACS_CNN, self).__init__()
+        self.in_channels = in_channels
+        self.features = None
+        self.classifier = None
+        self.norm = None
+        self.weight_standardization = weight_standardization
+        self.grad_sample_mode = grad_sample_mode
+        self.build(input_norm, **kwargs)
+
+    def build(self, input_norm=None, num_groups=None,
+              bn_stats=None, size=None):
+
+        if self.in_channels == 3:
+            if size == "small":
+                cfg = [16, 16, 'M', 32, 32, 'M', 64, 'M']
+            else:
+                cfg = [32, 32, 'M', 64, 64, 'M', 128, 128, 'M']
+
+            self.norm = nn.Identity()
+        else:
+            # print("build:", self.in_channels)
+            if size == "small":
+                cfg = [16, 16, 'M', 32, 32]
+            else:
+                cfg = [64, 'M', 64]
+
+            if input_norm is None:
+                self.norm = nn.Identity()
+            elif input_norm == "GroupNorm":
+                self.norm = nn.GroupNorm(num_groups, self.in_channels, affine=False)
+            else:
+                self.norm = lambda x: standardize(x, bn_stats, self.grad_sample_mode)
+
+        layers = []
+        act = nn.Tanh
+
+        c = self.in_channels
+        for v in cfg:
+            if v == 'M':
+                layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+            else:
+                if self.weight_standardization:
+                    conv2d = ScaledWSConv2d(c, v, kernel_size=3, stride=1, padding=1)
+                    print("ScaledWSConv2d")
+                else:
+                    conv2d = nn.Conv2d(c, v, kernel_size=3, stride=1, padding=1)
+                layers += [conv2d, act()]
+                c = v
+
+        self.features = nn.Sequential(*layers)
+
+        if self.in_channels == 3:
+            hidden = 128
+            self.classifier = nn.Sequential(nn.Linear(c * 4 * 4, hidden), act(), nn.Linear(hidden, 5))
+        else:
+            self.classifier = nn.Linear(c * 28 * 28, 5)  # 8, 8
+
+    def forward(self, x):
+        if self.in_channels != 3:
+            x = self.norm(x.view(-1, self.in_channels, 56, 56))  # 16, 16
+        # print(x.shape)
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
 
 CNNS = {
     "cifar10": CIFAR10_CNN,
@@ -376,5 +494,15 @@ CNNS = {
     "mnist": MNIST_CNN,
     "chest_xray": ChestXRay_CNN,
     "eye": Retinal_CNN,
-    "chexpert": CheXpert_CNN
+    "chexpert": CheXpert_CNN,
+    "chexpert_single": CheXpert_CNN,
+    "chexpert_tensors": CheXpert_CNN,
+    "chexpert_tensors_augmented": CheXpert_CNN,
+    "mnist_tensors": MNIST_CNN,
+    'cifar10_tensors': CIFAR10_CNN,
+    "eyepacs": EYEPACS_CNN,
+    'eyepacs_tensors': EYEPACS_CNN,
+    "eyepacs_complete": EYEPACS_CNN,
+    "eyepacs_complete_tensors": EYEPACS_CNN,
+    "eyepacs_complete_tensors_augmented": EYEPACS_CNN,
 }
