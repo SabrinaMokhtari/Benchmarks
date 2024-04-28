@@ -6,7 +6,7 @@ import pickle
 import numpy as np
 import logging
 import torchvision
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset, DataLoader, Subset, RandomSampler
 
 from libauc.losses import AUCMLoss, CrossEntropyLoss
 from libauc.optimizers import PESG, Adam
@@ -14,10 +14,19 @@ from libauc.models import densenet121 as DenseNet121
 from libauc.datasets import CheXpert
 from PIL import Image
 from sklearn.metrics import roc_auc_score
+from tqdm import tqdm
+import re
 
 import cv2
 import torchvision.transforms as tfs
 import pandas as pd
+from torchvision import transforms
+np.random.seed(51)
+
+import webdataset as wds
+import json
+
+
 
 SHAPES = {
     "cifar10": (32, 32, 3),
@@ -26,9 +35,14 @@ SHAPES = {
     "mnist": (28, 28, 1),
     "chest_xray": (64, 64, 3),
     "eye": (64, 64, 3),
-    "chexpert": (64, 64, 3)
+    "chexpert": (224, 224, 3),
+    "chexpert_single": (224, 224, 3),
+    "eyepacs": (224, 224, 3),
+    "eyepacs_complete": (224, 224, 3),
 }
 
+def identity(x):
+    return torch.tensor(json.loads(x))
 
 class MyImageDataset(Dataset):
     def __init__(self, root, transform=None, target_transform=None, augment=None):
@@ -51,8 +65,51 @@ class MyImageDataset(Dataset):
         return img, target
 
     def __getshape__(self):
-        print("HI:\n")
-        return (self.__len__(), *self.__getitem__(0)[0].shape)
+        return self.__len__(), *self.__getitem__(0)[0].shape
+
+
+class EyePACSDataset(Dataset):
+    def __init__(self, csv_file, root_dir, transform=None):
+        self.labels = pd.read_csv(csv_file)
+        self.root_dir = root_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.root_dir, self.labels.iloc[idx, 0] + '.jpeg')
+        image = Image.open(img_path)
+        label = self.labels.iloc[idx, 1]
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+class ScatterDataset(Dataset):
+    def __init__(self, x_folder, y_folder):
+        self.x_folder = x_folder
+        self.y_folder = y_folder
+        self.x_filenames = sorted(os.listdir(x_folder), key=lambda x: int(re.search(r'\d+', x).group()))
+        self.y_filenames = sorted(os.listdir(y_folder), key=lambda x: int(re.search(r'\d+', x).group()))
+
+    def __getitem__(self, index):
+        # import pdb; pdb.set_trace()
+        x = torch.load(os.path.join(self.x_folder, self.x_filenames[index])).float()    #   float is when grad_sample_mode is set to "no_op" for aug 8
+        y = torch.load(os.path.join(self.y_folder, self.y_filenames[index]))
+
+        # y = torch.tensor(int(y.item()))   # TODO for only Chexpert single label
+        # device = torch.device("cuda")   # TODO get the device instead of defining it here
+        # y_prime = torch.tensor([1.0]).to(device)
+        # y = torch.tensor([1, 0]).to(device) if y.eq(y_prime) else torch.tensor([0.0, 1.0]).to(device)
+        return x, y
+
+    def __len__(self):
+        return len(self.x_filenames)
+
+    def __getshape__(self):
+        return self.__len__(), *self.__getitem__(0)[0].shape
 
 
 class CheXpert(Dataset):
@@ -151,12 +208,12 @@ class CheXpert(Dataset):
                 if flip_label:
                     self.imratio = self.value_counts_dict[1] / (self.value_counts_dict[-1] + self.value_counts_dict[1])
                     print('Found %s images in total, %s positive images, %s negative images' % (
-                    self._num_images, self.value_counts_dict[1], self.value_counts_dict[-1]))
+                        self._num_images, self.value_counts_dict[1], self.value_counts_dict[-1]))
                     print('%s(C%s): imbalance ratio is %.4f' % (self.select_cols[0], class_index, self.imratio))
                 else:
                     self.imratio = self.value_counts_dict[1] / (self.value_counts_dict[0] + self.value_counts_dict[1])
                     print('Found %s images in total, %s positive images, %s negative images' % (
-                    self._num_images, self.value_counts_dict[1], self.value_counts_dict[0]))
+                        self._num_images, self.value_counts_dict[1], self.value_counts_dict[0]))
                     print('%s(C%s): imbalance ratio is %.4f' % (self.select_cols[0], class_index, self.imratio))
                 print('-' * 30)
             else:
@@ -164,10 +221,10 @@ class CheXpert(Dataset):
                 imratio_list = []
                 for class_key, select_col in enumerate(train_cols):
                     imratio = self.value_counts_dict[class_key][1] / (
-                                self.value_counts_dict[class_key][0] + self.value_counts_dict[class_key][1])
+                            self.value_counts_dict[class_key][0] + self.value_counts_dict[class_key][1])
                     imratio_list.append(imratio)
                     print('Found %s images in total, %s positive images, %s negative images' % (
-                    self._num_images, self.value_counts_dict[class_key][1], self.value_counts_dict[class_key][0]))
+                        self._num_images, self.value_counts_dict[class_key][1], self.value_counts_dict[class_key][0]))
                     print('%s(C%s): imbalance ratio is %.4f' % (select_col, class_key, imratio))
                     print()
                 self.imratio = np.mean(imratio_list)
@@ -322,13 +379,114 @@ def get_data(name, augment=False, **kwargs):
         test_set = MyImageDataset(root=test_dir, transform=trans)
 
     elif name == "chexpert":
-        root = '/home/ubuntu/chexpertchestxrays-u20210408/CheXpert-v1.0/'
+        root = '/share/TheSalon_Benchmarks/chexpertchestxrays-u20210408/CheXpert-v1.0/'
+
+        # Index: -1 denotes multi-label mode including 5 diseases
+        train_set = CheXpert(csv_path=root + 'train.csv', image_root_path=root, use_upsampling=False, use_frontal=False,
+                             image_size=224, mode='train', class_index=-1)
+        test_set = CheXpert(csv_path=root + 'valid.csv', image_root_path=root, use_upsampling=False, use_frontal=False,
+                            image_size=224, mode='valid', class_index=-1)
+
+    elif name == "chexpert_single":
+        root = '/share/TheSalon_Benchmarks/chexpertchestxrays-u20210408/CheXpert-v1.0/'
 
         # Index: -1 denotes multi-label mode including 5 diseases
         train_set = CheXpert(csv_path=root + 'train.csv', image_root_path=root, use_upsampling=True, use_frontal=True,
-                             image_size=64, mode='train', class_index=-1)
+                             image_size=224, mode='train', class_index=1)
         test_set = CheXpert(csv_path=root + 'valid.csv', image_root_path=root, use_upsampling=False, use_frontal=True,
-                            image_size=64, mode='valid', class_index=-1)
+                            image_size=224, mode='valid', class_index=1)
+
+    elif name == "eyepacs_complete":
+        transform = transforms.Compose([transforms.Resize((224, 224)),
+                                        transforms.ToTensor()])
+
+        train_set = EyePACSDataset('/share/TheSalon_Benchmarks/eyepacs_complete/trainLabels.csv',
+                                 '/share/TheSalon_Benchmarks/eyepacs_complete/train',
+                                 transform=transform)
+        test_set = EyePACSDataset('/share/TheSalon_Benchmarks/eyepacs_complete/retinopathy_solution.csv', 
+                                '/share/TheSalon_Benchmarks/eyepacs_complete/test',
+                                transform=transform)
+    
+    elif name == "eyepacs":
+        transform = transforms.Compose([transforms.Resize((224, 224)),
+                                        transforms.ToTensor()])
+
+        dataset = EyePACSDataset('/share/TheSalon_Benchmarks/eyepacs/trainLabels.csv',
+                                 '/share/TheSalon_Benchmarks/eyepacs/eyepacs_preprocess/eyepacs_preprocess',
+                                 transform=transform)
+
+        # Divide the dataset into train, test, and validation sets
+        num_train = int(len(dataset) * 0.7)
+        num_test = int(len(dataset) * 0.3)
+
+        print("Random Seed:", np.random.get_state()[1][0])
+        train_indices = np.random.choice(range(len(dataset)), num_train, replace=False)
+        test_indices = list(set(range(len(dataset))) - set(train_indices))
+
+        train_set = Subset(dataset, train_indices)
+        test_set = Subset(dataset, test_indices)
+
+    elif name == "eyepacs_complete_tensors":
+        print("eyepacs_complete_tensors")
+        train_set = ScatterDataset(
+            x_folder='/shared/shared_1/embeddings/eyepacs_complete/train/scatters',
+            y_folder='/shared/shared_1/embeddings/eyepacs_complete/train/targets')
+        test_set = ScatterDataset(
+            x_folder='/shared/shared_1/embeddings/eyepacs_complete/test/scatters',
+            y_folder='/shared/shared_1/embeddings/eyepacs_complete/test/targets')
+    
+    elif name == "eyepacs_complete_tensors_augmented":
+        train_set = ScatterDataset(
+            x_folder='/u2/s4mokhta/embeddings/eyepacs_complete_tensors_8/train/scatters',
+            y_folder='/u2/s4mokhta/embeddings/eyepacs_complete_tensors_8/train/targets')
+        test_set = ScatterDataset(
+            x_folder='/u2/s4mokhta/embeddings/eyepacs_complete_tensors/test/scatters',
+            y_folder='/u2/s4mokhta/embeddings/eyepacs_complete_tensors/test/targets')
+
+    elif name == "eyepacs_tensors":
+        print("eyepacs_51")
+        train_set = ScatterDataset(
+            x_folder='/share/TheSalon_Benchmarks/embeddings/eyepacs_51/train/scatters',
+            y_folder='/share/TheSalon_Benchmarks/embeddings/eyepacs_51/train/targets')
+        test_set = ScatterDataset(
+            x_folder='/share/TheSalon_Benchmarks/embeddings/eyepacs_51/train/scatters',
+            y_folder='/share/TheSalon_Benchmarks/embeddings/eyepacs_51/train/targets')
+
+    elif name == "chexpert_single_tensors":
+        train_set = ScatterDataset(
+            x_folder='/share/TheSalon_Benchmarks/embeddings/chexpert224_single/train/scatters',
+            y_folder='/share/TheSalon_Benchmarks/embeddings/chexpert224_single/train/targets')
+        test_set = ScatterDataset(
+            x_folder='/share/TheSalon_Benchmarks/embeddings/chexpert224_single/test/scatters',
+            y_folder='/share/TheSalon_Benchmarks/embeddings/chexpert224_single/test/targets')
+
+    elif name == "chexpert_tensors":
+        train_set = ScatterDataset(
+            x_folder='/shared/shared_1/embeddings/chexlocalize/train/scatters',
+            y_folder='/shared/shared_1/embeddings/chexlocalize/train/targets')
+        test_set = ScatterDataset(
+            x_folder='/shared/shared_1/embeddings/chexlocalize/test/scatters',
+            y_folder='/shared/shared_1/embeddings/chexlocalize/test/targets')
+    
+    elif name == "chexpert_tensors_augmented":
+        train_set = ScatterDataset(
+            x_folder='/shared/shared_1/embeddings/chexpert_tensors_augmented_8/train/scatters',
+            y_folder='/shared/shared_1/embeddings/chexpert_tensors_augmented_8/train/targets')
+        test_set = ScatterDataset(
+            x_folder='/shared/shared_1/embeddings/chexlocalize/test/scatters',
+            y_folder='/shared/shared_1/embeddings/chexlocalize/test/targets')
+
+    elif name == "mnist_tensors":
+        train_set = ScatterDataset(x_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/MNIST/scatters',
+                                   y_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/MNIST/targets')
+        test_set = ScatterDataset(x_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/MNIST/scatters',
+                                  y_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/MNIST/targets')
+
+    elif name == "cifar10_tensors":
+        train_set = ScatterDataset(x_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/cifar10/scatters',
+                                   y_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/cifar10/targets')
+        test_set = ScatterDataset(x_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/cifar10/scatters',
+                                  y_folder='/home/s4mokhta/DP-Benchmarks/Handcrafted-DP/embeddings/cifar10/targets')
 
     else:
         raise ValueError(f"unknown dataset {name}")
@@ -511,24 +669,73 @@ def get_scattered_dataset(loader, scattering, device, data_size):
     scatters = scatters[:data_size]
     targets = targets[:data_size]
 
-    data = torch.utils.data.TensorDataset(scatters, targets)
+    data = torch.utils.data.ScatterDataset(scatters, targets)
     return data
 
 
-def get_scattered_loader(loader, scattering, device, drop_last=False, sample_batches=False):
+def get_scattered_loader(loader, scattering, device, drop_last=False, sample_batches=False, aug_mult=True, num_augm_mult=8):
     # pre-compute a scattering transform (if there is one) and return
     # a DataLoader
 
     scatters = []
     targets = []
 
-    for (data, target) in loader:
-        data, target = data.to(device), target.to(device)
-        if scattering is not None:
-            data = scattering(data)
-        scatters.append(data)
-        targets.append(target)
+    if aug_mult:
+        aug = transforms.Compose([
+            transforms.Pad(4, padding_mode='reflect'), 
+            transforms.RandomCrop((224, 224)), 
+            transforms.RandomHorizontalFlip()])
 
+    total_batches = len(loader.dataset) // loader.batch_size
+
+    scatter_counter = 0
+    target_counter = 0
+    for index, (img, target) in enumerate(tqdm(loader, total=total_batches)):   # when using augmult, batch size should be 1
+        img, target = img.to(device), target.to(device)
+        if scattering is not None:
+            data = scattering(img)
+
+        if aug_mult:
+            for i in range(num_augm_mult - 1):
+                import pdb; pdb.set_trace()
+                aug_img = aug(img).contiguous()
+                if scattering is not None:
+                    aug_data = scattering(aug_img)
+                data = torch.cat((data, aug_data), dim=0)
+                del aug_data, aug_img
+
+        # for tensor in data:
+        print("Data Shape: ", data.shape)
+
+        data_file_name = '/shared/shared_1/embeddings/chexpert_tensors_augmented_8/train/scatters/scatters' + str(scatter_counter) + '.pt'
+
+        data_cloned = data.clone()
+
+        torch.save(data_cloned, data_file_name)
+
+        scatter_counter += 1
+        print("Saved file ", data_file_name)
+        print("Counter", scatter_counter)
+        del data, img
+
+        for t in target:
+            print("Targets Shape: ", t.shape)
+            target_file_name = '/shared/shared_1/embeddings/chexpert_tensors_augmented_8/train/targets/targets' + str(target_counter) + '.pt'
+
+            target_cloned = t.clone()
+
+            torch.save(target_cloned, target_file_name)
+
+            target_counter += 1
+            print("Saved file ", target_file_name)
+            print("Target Counter", target_counter)
+
+        # scatters.append(data)
+        # targets.append(target)
+        del target
+        torch.cuda.empty_cache()
+
+    print("Done!!")
     scatters = torch.cat(scatters, axis=0)
     targets = torch.cat(targets, axis=0)
 
