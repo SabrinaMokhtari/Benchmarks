@@ -10,7 +10,6 @@ Handcrafted-DP/__pycache__/
 Handcrafted-DP/.data/
 Handcrafted-DP/.idea/
 Handcrafted-DP/.ipynb_checkpoints/
-Handcrafted-DP/bn_stats/
 Handcrafted-DP/excel_results/
 Handcrafted-DP/outputs/
 Handcrafted-DP/results/
@@ -23,3 +22,5 @@ Handcrafted-DP/save_json.py
 Handcrafted-DP/slurm-6256.out
 Handcrafted-DP/log.txt
 Handcrafted-DP/test.py
+Handcrafted-DP/read_webdataset.py
+Handcrafted-DP/transfer.py
