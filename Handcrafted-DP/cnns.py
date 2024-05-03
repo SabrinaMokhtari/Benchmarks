@@ -108,7 +108,10 @@ def cnn_main(dataset, augment=False, use_scattering=False, size=None,
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         # optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
+    if ema_flag:
+        ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
+    else:    
+        ema = None
 
     best_acc = 0
     flat_count = 0
@@ -233,7 +236,10 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         # optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
+    if ema_flag:
+        ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
+    else:
+        ema = None
 
     privacy_engine = PrivacyEngine(accountant='prv')
 
@@ -266,7 +272,7 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
     best_acc = 0
     flat_count = 0
 
-    write_file=f"/u2/s4mokhta/outputs/private_augmented_8/{dataset}_epochs{epochs}_privacy{privacy}_max_epsilon{max_epsilon}_DELTA{DELTA}_max_grad_norm{max_grad_norm}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}_grad_sample_mode{grad_sample_mode}.txt"
+    write_file=f"/u2/s4mokhta/outputs/private-ema/{dataset}_epochs{epochs}_privacy{privacy}_max_epsilon{max_epsilon}_DELTA{DELTA}_max_grad_norm{max_grad_norm}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}_grad_sample_mode{grad_sample_mode}.txt"
     result_file = open(write_file, 'a')
     result_file.write(f'Minibatch size: {mini_batch_size}\nLearning Rate: {lr}\nOptimizer: {optim}\n')
     result_file.write(f'Epochs: {epochs}\nPrivacy: {privacy}\nMaximum Epsilon: {max_epsilon}\nDelta: {DELTA}\n'
@@ -277,10 +283,10 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
 
         if dataset == 'chexpert_tensors' or dataset == 'chexpert_tensors_augmented':
             train_loss, train_acc, train_val_auc_mean = CheXpert_train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
-            test_loss, test_acc, test_val_auc_mean = CheXpert_test(model, test_loader, ema)
+            test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = CheXpert_test(model, test_loader, ema)
         elif dataset == 'eyepacs_complete_tensors' or dataset == 'eyepacs_complete_tensors_augmented':
             train_loss, train_acc, train_val_auc_mean = train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
-            test_loss, test_acc, test_val_auc_mean = test(model, test_loader, ema)
+            test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = test(model, test_loader, ema)
 
         if noise_multiplier > 0:
             
@@ -295,6 +301,7 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
 
         result_file.write(f'Train set: Average loss: {train_loss}, Accuracy: {train_acc}, AUC: {train_val_auc_mean}\n')
         result_file.write(f'Test set: Average loss: {test_loss}, Accuracy: {test_acc}, AUC: {test_val_auc_mean}\n')
+        result_file.write(f'EMA Test set: Average loss: {ema_test_loss}, Accuracy: {ema_test_acc}, AUC: {ema_test_val_auc_mean}\n')
         result_file.write(f'Epsilon without considering BN: {epsilon}\n')
 
         # # stop if we're not making progress
