@@ -54,6 +54,7 @@ def train(model, train_loader, optimizer, ema, max_physical_batch_size=128, grad
     print(f'Train Loader: {len(train_loader)}, {train_loader.batch_size}')
 
     if grad_sample_mode == "no_op":
+        print("Using grad_sample_mode: no_op")
         # Functorch prepare
         fmodel, _fparams = make_functional(model)
 
@@ -101,10 +102,14 @@ def train(model, train_loader, optimizer, ema, max_physical_batch_size=128, grad
 
             losses.append(loss.item())
 
-            # ema.update()
+            if ema:
+                ema.update()
 
             with torch.no_grad():
-                orignial_data = data[:, 0]
+                if grad_sample_mode == "no_op":
+                    orignial_data = data[:, 0]
+                else:
+                    orignial_data = data
                 original_output = model(orignial_data)
 
                 pred = original_output.max(1, keepdim=True)[1]
@@ -206,12 +211,16 @@ def CheXpert_train(model, train_loader, optimizer, ema, max_physical_batch_size=
             optimizer.step()
             optimizer.zero_grad()
 
-            # ema.update()
+            if ema:
+                ema.update()
 
             losses.append(loss.item())
 
             with torch.no_grad():
-                orignial_data = data[:, 0]
+                if grad_sample_mode == "no_op":
+                    orignial_data = data[:, 0]
+                else:
+                    orignial_data = data
                 original_output = model(orignial_data)
                 # import pdb; pdb.set_trace()
                 # calculate multi-label accuracy
@@ -259,6 +268,14 @@ def test(model, test_loader, ema):
     test_pred_cuda = []
     test_true_cuda = []
 
+    ema_pred = []
+    ema_true = []
+
+    ema_pred_cuda = []
+    ema_true_cuda = []
+
+    ema_correct = 0
+
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.squeeze().to(device) # squeeze for ffcv
@@ -273,15 +290,21 @@ def test(model, test_loader, ema):
             test_pred.append(test_probs.cpu().detach().numpy()) # change test_probs to output for other than eyepacs
             test_true.append(target.cpu().detach().numpy())
 
-            # # Validation: with EMA
-            # # the .average_parameters() context manager
-            # # (1) saves original parameters before replacing with EMA version
-            # # (2) copies EMA parameters to model
-            # # (3) after exiting the `with`, restore original parameters to resume training later
-            # with ema.average_parameters():
-            #     logits = model(data)
-            #     ema_loss += F.cross_entropy(logits, target, reduction='sum').item()
-            #     print("EMA:", ema_loss)
+            if ema:
+                # Validation: with EMA
+                # the .average_parameters() context manager
+                # (1) saves original parameters before replacing with EMA version
+                # (2) copies EMA parameters to model
+                # (3) after exiting the `with`, restore original parameters to resume training later
+                with ema.average_parameters():
+                    logits = model(data)
+                    ema_loss += F.cross_entropy(logits, target, reduction='sum').item()
+                    ema_pred_temp = logits.max(1, keepdim=True)[1]
+                    ema_correct += ema_pred_temp.eq(target.view_as(ema_pred_temp)).sum().item()
+                    
+                    ema_probs = torch.softmax(logits, dim=1)
+                    ema_pred.append(ema_probs.cpu().detach().numpy()) # change test_probs to output for other than eyepacs
+                    ema_true.append(target.cpu().detach().numpy())
 
     test_true = np.concatenate(test_true)
     test_pred = np.concatenate(test_pred)
@@ -290,6 +313,17 @@ def test(model, test_loader, ema):
     test_loss /= num_examples
     test_acc = 100. * correct / num_examples
 
+    print(f'Test set: Average loss: {test_loss:.4f}', f'Test Accuracy {correct}/{num_examples}: {test_acc:.4f}', f'AUC: {val_auc_mean}')
+
+    if ema:
+        ema_true = np.concatenate(ema_true)
+        ema_pred = np.concatenate(ema_pred)
+        ema_auc_mean = roc_auc_score(ema_true, ema_pred, average='weighted', multi_class='ovr')
+
+        ema_loss /= num_examples
+        ema_acc = 100. * ema_correct / num_examples
+        print(f'EMA set: Average loss: {ema_loss:.4f}', f'Test Accuracy {ema_correct}/{num_examples}: {ema_acc:.4f}', f'AUC: {ema_auc_mean}')
+
     # threshold = 0.5
     # binary_labels_test = (test_pred > threshold).astype(int)
     # confusion_matrix = multilabel_confusion_matrix(test_true, binary_labels_test)
@@ -297,9 +331,11 @@ def test(model, test_loader, ema):
     #     print(f"Confusion matrix for label {i}:")
     #     print(cm)
 
-    print(f'Test set: Average loss: {test_loss:.4f}', f'Test Accuracy {correct}/{num_examples}: {test_acc:.4f}', f'AUC: {val_auc_mean}')
-
-    return test_loss, test_acc, val_auc_mean # change 0 to multi_label_acc for chexpert
+    if ema:
+        return test_loss, test_acc, val_auc_mean, ema_loss, ema_acc, ema_auc_mean # change 0 to multi_label_acc for chexpert
+    else:
+        return test_loss, test_acc, val_auc_mean, 0, 0, 0
+    # return test_loss, test_acc, val_auc_mean # change 0 to multi_label_acc for chexpert
 
 def CheXpert_test(model, test_loader, ema):
     device = next(model.parameters()).device
@@ -315,6 +351,14 @@ def CheXpert_test(model, test_loader, ema):
     test_pred_cuda = []
     test_true_cuda = []
 
+    ema_pred = []
+    ema_true = []
+
+    ema_pred_cuda = []
+    ema_true_cuda = []
+
+    # import pdb; pdb.set_trace()
+
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.squeeze().to(device) # squeeze for ffcv
@@ -329,15 +373,22 @@ def CheXpert_test(model, test_loader, ema):
             test_pred_cuda.append(output)
             test_true_cuda.append(target)
 
-            # # Validation: with EMA
-            # # the .average_parameters() context manager
-            # # (1) saves original parameters before replacing with EMA version
-            # # (2) copies EMA parameters to model
-            # # (3) after exiting the `with`, restore original parameters to resume training later
-            # with ema.average_parameters():
-            #     logits = model(data)
-            #     ema_loss += F.cross_entropy(logits, target, reduction='sum').item()
-            #     print("EMA:", ema_loss)
+            if ema:
+                # Validation: with EMA
+                # the .average_parameters() context manager
+                # (1) saves original parameters before replacing with EMA version
+                # (2) copies EMA parameters to model
+                # (3) after exiting the `with`, restore original parameters to resume training later
+                with ema.average_parameters():
+                    logits = model(data)
+                    ema_loss += test_CELoss(logits, target, reduction='sum').item()
+                
+
+                    ema_pred.append(logits.cpu().detach().numpy()) # change test_probs to output for other than eyepacs
+                    ema_true.append(target.cpu().detach().numpy())
+
+                    ema_pred_cuda.append(logits)
+                    ema_true_cuda.append(target)
 
     test_loss /= num_examples
 
@@ -349,6 +400,22 @@ def CheXpert_test(model, test_loader, ema):
     test_true_cuda = torch.cat(test_true_cuda)
     multi_label_acc = multilabel_accuracy(test_pred_cuda, test_true_cuda, num_labels=test_true_cuda.size(dim=1), average=None).cpu()
 
-    print(f'Test set: AUC: {val_auc_mean}', f'Multi-Label Accuracy: {multi_label_acc}', f'val_auc_mean: {val_auc_mean}')
+    print(f'Test set: Loss: {test_loss}', f'Multi-Label Accuracy: {multi_label_acc}', f'val_auc_mean: {val_auc_mean}')
 
-    return test_loss, multi_label_acc, val_auc_mean # change 0 to multi_label_acc for chexpert
+    if ema:
+        ema_loss /= num_examples
+
+        ema_true = np.concatenate(ema_true)
+        ema_pred = np.concatenate(ema_pred)
+        ema_auc_mean = roc_auc_score(ema_true, ema_pred, average='weighted', multi_class='ovr')
+
+        ema_pred_cuda = torch.cat(ema_pred_cuda)
+        ema_true_cuda = torch.cat(ema_true_cuda)
+        ema_multi_label_acc = multilabel_accuracy(ema_pred_cuda, ema_true_cuda, num_labels=ema_true_cuda.size(dim=1), average=None).cpu()
+
+        print(f'EMA set: Loss: {ema_loss}', f'Multi-Label Accuracy: {ema_multi_label_acc}', f'val_auc_mean: {ema_auc_mean}')
+
+    if ema:
+        return test_loss, multi_label_acc, val_auc_mean, ema_loss, ema_multi_label_acc, ema_auc_mean # change 0 to multi_label_acc for chexpert
+    else:
+        return test_loss, multi_label_acc, val_auc_mean, 0, 0, 0
