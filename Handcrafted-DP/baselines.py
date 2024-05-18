@@ -24,7 +24,8 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
          input_norm=None, num_groups=None, bn_noise_multiplier=None,
          max_epsilon=None, logdir=None, early_stop=True,
          max_physical_batch_size=128, weight_decay=1e-5, privacy=True,
-         weight_standardization=True, ema_flag=True, write_file=None, grad_sample_mode=None):
+         weight_standardization=True, ema_flag=True, write_file=None, 
+         grad_sample_mode=None):
 
     logger = Logger(logdir)
     device = get_device()
@@ -112,7 +113,10 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
     best_acc = 0
     flat_count = 0
 
-    ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
+    if ema_flag:
+        ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
+    else:
+        ema = None
 
     write_file=f"/u2/s4mokhta/outputs/linear-non-private/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}.txt"
     result_file = open(write_file, 'a')
@@ -124,15 +128,16 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
     for epoch in range(0, epochs):
         print(f"\nEpoch: {epoch}")
 
-        if dataset == 'chexpert_tensors':
-            train_loss, train_acc, train_val_auc_mean = CheXpert_train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size)
-            test_loss, test_acc, test_val_auc_mean = CheXpert_test(model, test_loader, ema)
-        elif dataset == 'eyepacs_complete_tensors':
-            train_loss, train_acc, train_val_auc_mean = train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size)
-            test_loss, test_acc, test_val_auc_mean = test(model, test_loader, ema)
+        if dataset == 'chexpert_tensors' or dataset == 'chexpert_tensors_augmented':
+            train_loss, train_acc, train_val_auc_mean = CheXpert_train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
+            test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = CheXpert_test(model, test_loader, ema)
+        elif dataset == 'eyepacs_complete_tensors' or dataset == 'eyepacs_complete_tensors_augmented':
+            train_loss, train_acc, train_val_auc_mean = train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
+            test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = test(model, test_loader, ema)
 
         result_file.write(f'Train set: Average loss: {train_loss}, Accuracy: {train_acc}, AUC: {train_val_auc_mean}\n')
         result_file.write(f'Test set: Average loss: {test_loss}, Accuracy: {test_acc}, AUC: {test_val_auc_mean}\n')
+        result_file.write(f'EMA Test set: Average loss: {ema_test_loss}, Accuracy: {ema_test_acc}, AUC: {ema_test_val_auc_mean}\n')
 
 def main(dataset, augment=False, use_scattering=False, size=None,
          mini_batch_size=256, sample_batches=False,
@@ -141,7 +146,8 @@ def main(dataset, augment=False, use_scattering=False, size=None,
          input_norm=None, num_groups=None, bn_noise_multiplier=None,
          max_epsilon=None, logdir=None, early_stop=True,
          max_physical_batch_size=128, weight_decay=1e-5, privacy=True,
-         weight_standardization=True, ema_flag=True, write_file=None, grad_sample_mode=None):
+         weight_standardization=True, ema_flag=True, write_file=None,
+         grad_sample_mode=None):
 
     logger = Logger(logdir)
     device = get_device()
@@ -284,10 +290,34 @@ def main(dataset, augment=False, use_scattering=False, size=None,
 
 if __name__ == '__main__':
     torch.cuda.empty_cache()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', choices=['chexpert_tensors', 'eyepacs_complete_tensors'])
+    parser.add_argument('--mini_batch_size', type=int, default=1024)
+    parser.add_argument('--input_norm', default=None, choices=["GroupNorm", "BN"])
+    parser.add_argument('--max_grad_norm', nargs='+', type=float, help='List of floats')
+    parser.add_argument('--num_groups', nargs='+', type=int, help='List of integers')
+    parser.add_argument('--max_epsilon', type=int, default=3)
+    args = parser.parse_args()
+
+    # Access the list argument
+    num_groups = args.num_groups
+    max_grad_norm = args.max_grad_norm
+    input_norm = args.input_norm
+    dataset = args.dataset
+    mini_batch_size = args.mini_batch_size
+    max_epsilon = args.max_epsilon
     
     params = CONFIG.params
 
     variables_dict = CONFIG.variable_parameters_dict
+
+    variables_dict['num_groups'] = num_groups
+    variables_dict['max_grad_norm'] = max_grad_norm 
+    variables_dict['input_norm'] = [input_norm]
+    variables_dict['dataset'] = [dataset]
+    variables_dict['mini_batch_size'] = [mini_batch_size]
+    variables_dict['max_epsilon'] = [max_epsilon]
 
     variables = list(ParameterGrid(variables_dict))
     
@@ -301,6 +331,8 @@ if __name__ == '__main__':
 
             privacy = params['privacy']
             if privacy:
+                print("Running private experiment")
                 main(**params)
             else:
+                print("Running non-private experiment")
                 non_private_main(**params)
