@@ -25,7 +25,7 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
          max_epsilon=None, logdir=None, early_stop=True,
          max_physical_batch_size=128, weight_decay=1e-5, privacy=True,
          weight_standardization=True, ema_flag=True, write_file=None, 
-         grad_sample_mode=None):
+         grad_sample_mode=None, log_file=None, checkpoin_dir=None):
 
     logger = Logger(logdir)
     device = get_device()
@@ -53,52 +53,13 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
                                                    len(train_data),
                                                    noise_multiplier=bn_noise_multiplier,
                                                    orders=ORDERS,
-                                                   save_dir=save_dir)
+                                                   save_dir=save_dir, 
+                                                   grad_sample_mode=grad_sample_mode)
         model = ScatterLinear(K, (h, w), input_norm="BN", classes = 5, bn_stats=bn_stats)
     else:
         model = ScatterLinear(K, (h, w), input_norm=input_norm, classes=5, num_groups=num_groups)
 
     model.to(device)
-
-    # baseline Logistic Regression without privacy
-    if optim == "LR":
-        assert not augment
-        X_train = []
-        y_train = []
-        X_test = []
-        y_test = []
-        for data, target in train_loader:
-            with torch.no_grad():
-                data = data.to(device)
-                X_train.append(data.cpu().numpy().reshape(len(data), -1))
-                y_train.extend(target.cpu().numpy())
-
-        for data, target in test_loader:
-            with torch.no_grad():
-                data = data.to(device)
-                X_test.append(data.cpu().numpy().reshape(len(data), -1))
-                y_test.extend(target.cpu().numpy())
-
-        import numpy as np
-        X_train = np.concatenate(X_train, axis=0)
-        X_test = np.concatenate(X_test, axis=0)
-        y_train = np.asarray(y_train)
-        y_test = np.asarray(y_test)
-
-        print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
-
-        for idx, C in enumerate([0.01, 0.1, 1.0, 10, 100]):
-            clf = LogisticRegression(C=C, fit_intercept=True)
-            clf.fit(X_train, y_train)
-
-            train_acc = 100 * clf.score(X_train, y_train)
-            test_acc = 100 * clf.score(X_test, y_test)
-            print(f"C={C}, "
-                  f"Acc train = {train_acc: .2f}, "
-                  f"Acc test = {test_acc: .2f}")
-
-            logger.log_epoch(idx, 0, train_acc, 0, test_acc, None)
-        return
 
     print(f"model has {get_num_params(model)} parameters")
 
@@ -108,17 +69,13 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
                                     nesterov=nesterov)
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        
-
-    best_acc = 0
-    flat_count = 0
 
     if ema_flag:
         ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
     else:
         ema = None
 
-    write_file=f"/u2/s4mokhta/outputs/linear-non-private/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}.txt"
+    write_file=f"{log_file}/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}.txt"
     result_file = open(write_file, 'a')
     result_file.write(f'Minibatch size: {mini_batch_size}\nLearning Rate: {lr}\nOptimizer: {optim}\n')
     result_file.write(f'Epochs: {epochs}\nPrivacy: {privacy}\nMaximum Epsilon: {max_epsilon}\n'
@@ -134,6 +91,14 @@ def non_private_main(dataset, augment=False, use_scattering=False, size=None,
         elif dataset == 'eyepacs_complete_tensors' or dataset == 'eyepacs_complete_tensors_augmented':
             train_loss, train_acc, train_val_auc_mean = train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
             test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = test(model, test_loader, ema)
+        
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+        checkpoint_file = f'{checkpoin_dir}/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_BatchSize{mini_batch_size}_checkpoint_{epoch}.pth'
+        torch.save(checkpoint, checkpoint_file)
 
         result_file.write(f'Train set: Average loss: {train_loss}, Accuracy: {train_acc}, AUC: {train_val_auc_mean}\n')
         result_file.write(f'Test set: Average loss: {test_loss}, Accuracy: {test_acc}, AUC: {test_val_auc_mean}\n')
@@ -147,7 +112,7 @@ def main(dataset, augment=False, use_scattering=False, size=None,
          max_epsilon=None, logdir=None, early_stop=True,
          max_physical_batch_size=128, weight_decay=1e-5, privacy=True,
          weight_standardization=True, ema_flag=True, write_file=None,
-         grad_sample_mode=None):
+         grad_sample_mode=None, log_file=None):
 
     logger = Logger(logdir)
     device = get_device()
@@ -184,46 +149,6 @@ def main(dataset, augment=False, use_scattering=False, size=None,
 
     model.to(device)
 
-    # baseline Logistic Regression without privacy
-    if optim == "LR":
-        assert not augment
-        X_train = []
-        y_train = []
-        X_test = []
-        y_test = []
-        for data, target in train_loader:
-            with torch.no_grad():
-                data = data.to(device)
-                X_train.append(data.cpu().numpy().reshape(len(data), -1))
-                y_train.extend(target.cpu().numpy())
-
-        for data, target in test_loader:
-            with torch.no_grad():
-                data = data.to(device)
-                X_test.append(data.cpu().numpy().reshape(len(data), -1))
-                y_test.extend(target.cpu().numpy())
-
-        import numpy as np
-        X_train = np.concatenate(X_train, axis=0)
-        X_test = np.concatenate(X_test, axis=0)
-        y_train = np.asarray(y_train)
-        y_test = np.asarray(y_test)
-
-        print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
-
-        for idx, C in enumerate([0.01, 0.1, 1.0, 10, 100]):
-            clf = LogisticRegression(C=C, fit_intercept=True)
-            clf.fit(X_train, y_train)
-
-            train_acc = 100 * clf.score(X_train, y_train)
-            test_acc = 100 * clf.score(X_test, y_test)
-            print(f"C={C}, "
-                  f"Acc train = {train_acc: .2f}, "
-                  f"Acc test = {test_acc: .2f}")
-
-            logger.log_epoch(idx, 0, train_acc, 0, test_acc, None)
-        return
-
     print(f"model has {get_num_params(model)} parameters")
 
     if optim == "SGD":
@@ -247,15 +172,12 @@ def main(dataset, augment=False, use_scattering=False, size=None,
     noise_multiplier = optimizer.noise_multiplier # change it to for private experiments optimizer.noise_multiplier o/w 0
     print(f"Using sigma={optimizer.noise_multiplier} and C={max_grad_norm}")
 
-    best_acc = 0
-    flat_count = 0
-
     if ema_flag:
         ema = ExponentialMovingAverage(model.parameters(), decay=0.9999)
     else:
         ema = None
 
-    write_file=f"/u2/s4mokhta/outputs/linear/{dataset}_epochs{epochs}_privacy{privacy}_max_epsilon{max_epsilon}_DELTA{DELTA}_max_grad_norm{max_grad_norm}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}.txt"
+    write_file=f"{log_file}/{dataset}_epochs{epochs}_privacy{privacy}_max_epsilon{max_epsilon}_DELTA{DELTA}_max_grad_norm{max_grad_norm}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}.txt"
     result_file = open(write_file, 'a')
     result_file.write(f'Minibatch size: {mini_batch_size}\nLearning Rate: {lr}\nOptimizer: {optim}\n')
     result_file.write(f'Epochs: {epochs}\nPrivacy: {privacy}\nMaximum Epsilon: {max_epsilon}\nDelta: {DELTA}\n'
@@ -290,34 +212,10 @@ def main(dataset, augment=False, use_scattering=False, size=None,
 
 if __name__ == '__main__':
     torch.cuda.empty_cache()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', choices=['chexpert_tensors', 'eyepacs_complete_tensors'])
-    parser.add_argument('--mini_batch_size', type=int, default=1024)
-    parser.add_argument('--input_norm', default=None, choices=["GroupNorm", "BN"])
-    parser.add_argument('--max_grad_norm', nargs='+', type=float, help='List of floats')
-    parser.add_argument('--num_groups', nargs='+', type=int, help='List of integers')
-    parser.add_argument('--max_epsilon', type=int, default=3)
-    args = parser.parse_args()
-
-    # Access the list argument
-    num_groups = args.num_groups
-    max_grad_norm = args.max_grad_norm
-    input_norm = args.input_norm
-    dataset = args.dataset
-    mini_batch_size = args.mini_batch_size
-    max_epsilon = args.max_epsilon
     
     params = CONFIG.params
 
     variables_dict = CONFIG.variable_parameters_dict
-
-    variables_dict['num_groups'] = num_groups
-    variables_dict['max_grad_norm'] = max_grad_norm 
-    variables_dict['input_norm'] = [input_norm]
-    variables_dict['dataset'] = [dataset]
-    variables_dict['mini_batch_size'] = [mini_batch_size]
-    variables_dict['max_epsilon'] = [max_epsilon]
 
     variables = list(ParameterGrid(variables_dict))
     
@@ -331,8 +229,8 @@ if __name__ == '__main__':
 
             privacy = params['privacy']
             if privacy:
-                print("Running private experiment")
+                print("Running private linear experiment...")
                 main(**params)
             else:
-                print("Running non-private experiment")
+                print("Running non-private linear experiment...")
                 non_private_main(**params)
