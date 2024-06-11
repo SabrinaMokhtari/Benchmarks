@@ -40,7 +40,8 @@ def cnn_main(dataset, augment=False, use_scattering=False, size=None,
          input_norm=None, num_groups=None, bn_noise_multiplier=None,
          max_epsilon=None, logdir=None, early_stop=True,
          max_physical_batch_size=128, weight_decay=1e-5, privacy=False,
-         weight_standardization=True, ema_flag=True):
+         weight_standardization=True, ema_flag=True,
+         grad_sample_mode="no_op", log_file=None):
 
     logger = Logger(logdir)
     device = get_device()
@@ -116,41 +117,30 @@ def cnn_main(dataset, augment=False, use_scattering=False, size=None,
     best_acc = 0
     flat_count = 0
 
-    write_file=f"/u2/s4mokhta/outputs/non-private/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_groups{num_groups}.txt"
+    write_file=f"{log_file}/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_groups{num_groups}.txt"
     result_file = open(write_file, 'a')
     result_file.write(f'Minibatch size: {mini_batch_size}\nLearning Rate: {lr}\nOptimizer: {optim}\n')
 
     for epoch in range(0, epochs):
         print(f"\nEpoch: {epoch}")
         
-        if dataset == 'chexpert_tensors':
-            train_loss, train_acc, train_val_auc_mean = CheXpert_train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size)
-            test_loss, test_acc, test_val_auc_mean = CheXpert_test(model, test_loader, ema)
-        elif dataset == 'eyepacs_complete_tensors':
-            train_loss, train_acc, train_val_auc_mean = train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size)
-            test_loss, test_acc, test_val_auc_mean = test(model, test_loader, ema)
-
-        if noise_multiplier > 0:
-            epsilon = privacy_engine.get_epsilon(delta=DELTA)
-            print(f"ε = {epsilon:.2f}")
-
-            if max_epsilon is not None and epsilon >= max_epsilon:
-                return
-        else:
-            epsilon = None
-
+        if dataset == 'chexpert_tensors' or dataset == 'chexpert_tensors_augmented':
+            train_loss, train_acc, train_val_auc_mean = CheXpert_train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
+            test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = CheXpert_test(model, test_loader, ema)
+        elif dataset == 'eyepacs_complete_tensors' or dataset == 'eyepacs_complete_tensors_augmented':
+            train_loss, train_acc, train_val_auc_mean = train(model, train_loader, optimizer, ema, max_physical_batch_size=max_physical_batch_size, grad_sample_mode=grad_sample_mode)
+            test_loss, test_acc, test_val_auc_mean, ema_test_loss, ema_test_acc, ema_test_val_auc_mean = test(model, test_loader, ema)
+        
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+        checkpoint_file = f'/u2/s4mokhta/checkpoints/cnn/{dataset}_epochs{epochs}_privacy{privacy}_Optim{optim}_LR{lr}_BatchSize{mini_batch_size}_checkpoint_{epoch}.pth'
+        torch.save(checkpoint, checkpoint_file)
+        
         result_file.write(f'Train set: Average loss: {train_loss}, Accuracy: {train_acc}, AUC: {train_val_auc_mean}\n')
         result_file.write(f'Test set: Average loss: {test_loss}, Accuracy: {test_acc}, AUC: {test_val_auc_mean}\n')
-
-        # # stop if we're not making progress
-        # if test_acc > best_acc:
-        #     best_acc = test_acc
-        #     flat_count = 0
-        # else:
-        #     flat_count += 1
-        #     if flat_count >= 20 and early_stop:
-        #         print("plateau...")
-        #         return
 
     result_file.close()
 
@@ -161,7 +151,8 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
          input_norm=None, num_groups=None, bn_noise_multiplier=None,
          max_epsilon=None, logdir=None, early_stop=True,
          max_physical_batch_size=128, weight_decay=1e-5, privacy=True,
-         weight_standardization=True, ema_flag=True, write_file=None, grad_sample_mode="no_op"):
+         weight_standardization=True, ema_flag=True, write_file=None, 
+         grad_sample_mode="no_op", log_file=None):
 
     logger = Logger(logdir)
     device = get_device()
@@ -272,7 +263,7 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
     best_acc = 0
     flat_count = 0
 
-    write_file=f"/u2/s4mokhta/outputs/private-ema/{dataset}_epochs{epochs}_privacy{privacy}_max_epsilon{max_epsilon}_DELTA{DELTA}_max_grad_norm{max_grad_norm}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}_grad_sample_mode{grad_sample_mode}.txt"
+    write_file=f"{log_file}/{dataset}_epochs{epochs}_privacy{privacy}_max_epsilon{max_epsilon}_DELTA{DELTA}_max_grad_norm{max_grad_norm}_Optim{optim}_LR{lr}_WS{weight_standardization}_EMA{ema_flag}_BatchSize{mini_batch_size}_input_norm{input_norm}_num_groups{num_groups}_grad_sample_mode{grad_sample_mode}.txt"
     result_file = open(write_file, 'a')
     result_file.write(f'Minibatch size: {mini_batch_size}\nLearning Rate: {lr}\nOptimizer: {optim}\n')
     result_file.write(f'Epochs: {epochs}\nPrivacy: {privacy}\nMaximum Epsilon: {max_epsilon}\nDelta: {DELTA}\n'
@@ -304,16 +295,6 @@ def private_cnn_main(dataset, augment=False, use_scattering=False, size=None,
         result_file.write(f'EMA Test set: Average loss: {ema_test_loss}, Accuracy: {ema_test_acc}, AUC: {ema_test_val_auc_mean}\n')
         result_file.write(f'Epsilon without considering BN: {epsilon}\n')
 
-        # # stop if we're not making progress
-        # if test_acc > best_acc:
-        #     best_acc = test_acc
-        #     flat_count = 0
-        # else:
-        #     flat_count += 1
-        #     if flat_count >= 20 and early_stop:
-        #         print("plateau...")
-        #         return
-
     if input_norm == "BN":  # add BN privacy step for BN
         privacy_engine.accountant.step(noise_multiplier=bn_noise_multiplier, sample_rate=1)
         privacy_engine.accountant.step(noise_multiplier=bn_noise_multiplier, sample_rate=1)
@@ -339,8 +320,9 @@ if __name__ == '__main__':
             print(params)
 
             privacy = params['privacy']
-            # set_start_method('spawn', force=True)
             if privacy:
+                print("Running private CNN")
                 private_cnn_main(**params)
             else:
+                print("Running non-private CNN")
                 cnn_main(**params)
